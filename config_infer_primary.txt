@@ -1,12 +1,11 @@
 [property]
 gpu-id=0
-#net-scale-factor=0.0039215697906911373
 net-scale-factor=1.0
 
 # 0:RGB 1:BGR
 model-color-format=0
 
-model-engine-file=/opt/nvidia/deepstream/deepstream-5.1/sources/apps/ulala_pipeline/yolox_s__ulala_384_640_p0.engine
+model-engine-file=/works/yolox_s__ulala_384_640_p5.engine
 
 labelfile-path=labels.txt
 num-detected-classes=3

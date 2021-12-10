@@ -16,7 +16,7 @@ enable=1
 
 # 1:camera(v4l2) 2: single uri 3:multi uri 4:rtsp 5 camera(CSI) only for Jetson
 type=2
-uri=file:///opt/nvidia/deepstream/deepstream-5.1/samples/streams/ulala_sample1.mp4
+uri=file:///works/ulala_sample1.mp4
 num-sources=1
 gpu-id=0
 cudadec-memtype=0
@@ -32,13 +32,13 @@ source-id=0
 gpu-id=0
 container=1
 codec=1
-output-file=./output.mp4
+output-file=./output2.mp4
 nvbuf-memory-type=0
 rtsp-port=8554
 udp-port=5400
 
 [sink1]
-enable=1
+enable=0
 
 # 3:save file 4:rtsp
 enable=1

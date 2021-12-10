@@ -27,7 +27,7 @@
 
 
 #define DEVICE 0  // GPU id
-#define NMS_THRESH 0.65
+#define NMS_THRESH 0.3
 #define BBOX_CONF_THRESH 0.3
 
 
