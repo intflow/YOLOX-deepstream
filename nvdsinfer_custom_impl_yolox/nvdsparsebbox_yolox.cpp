@@ -1,288 +1,156 @@
-/*
- * Copyright (c) 2020, NVIDIA CORPORATION. All rights reserved.
+/**
+ * Copyright (c) 2022, Intflow Inc.  All rights reserved.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * NVIDIA Corporation and its licensors retain all intellectual property
+ * and proprietary rights in and to this software, related documentation
+ * and any modifications thereto.  Any use, reproduction, disclosure or
+ * distridbution of this software and related documentation without an express
+ * license agreement from NVIDIA Corporation is strictly prohibited.
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
  */
 
-#include <algorithm>
-#include <cassert>
-#include <cmath>
 #include <cstring>
-#include <fstream>
-#include <vector>
-#include <omp.h>
-#include <opencv2/opencv.hpp>
+#include <iostream>
 #include "nvdsinfer_custom_impl.h"
+#include "edgefarm_config.h"
+#include <cmath>
+#define MIN(a,b) ((a) < (b) ? (a) : (b))
 
+/* This is a sample bounding box parsing function for the sample Resnet10
+ * detector model provided with the SDK. */
 
-
-#define DEVICE 0  // GPU id
-#define NMS_THRESH 0.65
-#define BBOX_CONF_THRESH 0.3
-
-
-static const int INPUT_W = 640;
-static const int INPUT_H = 640;
-const char* INPUT_BLOB_NAME = "images";
-const char* OUTPUT_BLOB_NAME = "output";
-
-
-
-struct Object
+/* C-linkage to prevent name-mangling */
+extern "C"
+bool NvDsInferParseCustomYolox  (std::vector<NvDsInferLayerInfo> const &outputLayersInfo,
+        NvDsInferNetworkInfo  const &networkInfo,
+        NvDsInferParseDetectionParams const &detectionParams,
+        std::vector<NvDsInferParseObjectInfo> &objectList)
 {
-    cv::Rect_<float> rect;
-    int label;
-    float prob;
-};
-
-struct GridAndStride
-{
-    int grid0;
-    int grid1;
-    int stride;
-};
-
-static void generate_grids_and_stride(const int target_size, std::vector<int>& strides, std::vector<GridAndStride>& grid_strides)
-{
-    for (auto stride : strides)
-    {
-        int num_grid = target_size / stride;
-        for (int g1 = 0; g1 < num_grid; g1++)
-        {
-            for (int g0 = 0; g0 < num_grid; g0++)
-            {
-                grid_strides.push_back((GridAndStride){g0, g1, stride});
+    auto layerFinder = [&outputLayersInfo](const std::string &name)
+        -> const NvDsInferLayerInfo *{
+        for (auto &layer : outputLayersInfo) {
+            if (layer.dataType == FLOAT &&
+              (layer.layerName && name == layer.layerName)) {
+                return &layer;
             }
         }
+        return nullptr;
+    };
+
+    const NvDsInferLayerInfo *outputLayer = layerFinder("output0");
+
+    if (!outputLayer){
+        std::cerr << "ERROR: output layer missing or unsupported data types in output tensors" << std::endl;
+        return false;
     }
-}
 
-static inline float intersection_area(const Object& a, const Object& b)
-{
-    cv::Rect_<float> inter = a.rect & b.rect;
-    return inter.area();
-}
+    const int det_max_instance = outputLayer->inferDims.d[0];
+    const int det_elements_per_instance = 34; // x1, y1, x2, y2, rad  class,class,class class kpt27  // 5 + 4 + 27
 
-static void qsort_descent_inplace(std::vector<Object>& faceobjects, int left, int right)
-{
-    int i = left;
-    int j = right;
-    float p = faceobjects[(left + right) / 2].prob;
+    if (outputLayer->inferDims.numDims != 2 || outputLayer->inferDims.d[1] != det_elements_per_instance) {
+        std::cerr << "ERROR: output layer dimensions are incorrect" << std::endl;
+        return false;
+    }
+    float image_w = MUXER_OUTPUT_WIDTH;    
+    float image_h = MUXER_OUTPUT_HEIGHT;
+    float scale_x = 1;
+    float scale_y = 1;
+    float scale = std::min(512 / (image_w*1.0), 288 / (image_h*1.0));
+    float *outputData = (float *)outputLayer->buffer;
 
-    while (i <= j)
-    {
-        while (faceobjects[i].prob > p)
-            i++;
+  for (int indx = 0; indx < det_max_instance; indx++)
+  {
+        float cx = outputData[indx * det_elements_per_instance + 0] / scale*1.0;
+        float cy = outputData[indx * det_elements_per_instance + 1] / scale*1.0;
+        float w = outputData[indx * det_elements_per_instance + 2] /  scale*1.0;
+        float h = outputData[indx * det_elements_per_instance + 3] /  scale*1.0;
+        float rad = outputData[indx * det_elements_per_instance + 4];
+        float x1=cx-(w/2.0);
+        float y1=cy-(h/2.0);
+        float x2=cx+(w/2.0);
+        float y2=cy+(h/2.0);
+        float max_score = outputData[indx * det_elements_per_instance + 5];
+        float max_index = outputData[indx * det_elements_per_instance + 6];
 
-        while (faceobjects[j].prob < p)
-            j--;
 
-        if (i <= j)
-        {
-            // swap
-            std::swap(faceobjects[i], faceobjects[j]);
+        float kpt_x1 = outputData[indx * det_elements_per_instance + 7] / scale*1.0;
+        float kpt_y1 = outputData[indx * det_elements_per_instance + 8] / scale*1.0;
+        float kpt_v1 = outputData[indx * det_elements_per_instance + 9];
 
-            i++;
-            j--;
+        float kpt_x2 = outputData[indx * det_elements_per_instance + 10] / scale*1.0;
+        float kpt_y2 = outputData[indx * det_elements_per_instance + 11] / scale*1.0;
+        float kpt_v2 = outputData[indx * det_elements_per_instance + 12];
+
+        float kpt_x3 = outputData[indx * det_elements_per_instance + 13] / scale*1.0;
+        float kpt_y3 = outputData[indx * det_elements_per_instance + 14] / scale*1.0;
+        float kpt_v3 = outputData[indx * det_elements_per_instance + 15];
+
+        float kpt_x4 = outputData[indx * det_elements_per_instance + 16] / scale*1.0;
+        float kpt_y4 = outputData[indx * det_elements_per_instance + 17] / scale*1.0;
+        float kpt_v4 = outputData[indx * det_elements_per_instance + 18];
+
+        float kpt_x5 = outputData[indx * det_elements_per_instance + 19] / scale*1.0;
+        float kpt_y5 = outputData[indx * det_elements_per_instance + 20] / scale*1.0;
+        float kpt_v5 = outputData[indx * det_elements_per_instance + 21];
+
+        float kpt_x6 = outputData[indx * det_elements_per_instance + 22] / scale*1.0;
+        float kpt_y6 = outputData[indx * det_elements_per_instance + 23] / scale*1.0;
+        float kpt_v6 = outputData[indx * det_elements_per_instance + 24];
+
+        float kpt_x7 = outputData[indx * det_elements_per_instance + 25] / scale;
+        float kpt_y7 = outputData[indx * det_elements_per_instance + 26] / scale;
+        float kpt_v7 = outputData[indx * det_elements_per_instance + 27];
+
+        float kpt_x8 = outputData[indx * det_elements_per_instance + 28] / scale;
+        float kpt_y8 = outputData[indx * det_elements_per_instance + 29] / scale;
+        float kpt_v8 = outputData[indx * det_elements_per_instance + 30];
+
+        float kpt_x9 = outputData[indx * det_elements_per_instance + 31] / scale;
+        float kpt_y9 = outputData[indx * det_elements_per_instance + 32] / scale;
+        float kpt_v9 = outputData[indx * det_elements_per_instance + 33];
+
+
+        float threshold = detectionParams.perClassThreshold[max_index];
+
+        if (max_score>threshold){
+//		std::cout<<threshold;
+            NvDsInferParseObjectInfo object;
+            object.left = x1;
+            object.top = y1;
+            object.width = x2 - x1;
+            object.height = y2 - y1;
+
+            object.theta =rad;
+            object.classId = max_index;
+            object.detectionConfidence = max_score;
+            object.landmarksX1  = kpt_x1;
+            object.landmarksY1  = kpt_y1;
+            object.landmarksX2  = kpt_x2;
+            object.landmarksY2  = kpt_y2;
+            object.landmarksX3  = kpt_x3;
+            object.landmarksY3  = kpt_y3;
+            object.landmarksX4  = kpt_x4;
+            object.landmarksY4  = kpt_y4;
+            object.landmarksX5  = kpt_x5;
+            object.landmarksY5  = kpt_y5;
+            object.landmarksX6  = kpt_x6;
+            object.landmarksY6  = kpt_y6;
+            object.landmarksX7  = kpt_x7;
+            object.landmarksY7  = kpt_y7;
+            object.landmarksX8  = kpt_x8;
+            object.landmarksY8  = kpt_y8;
+            object.landmarksX9  = kpt_x9;
+            object.landmarksY9  = kpt_y9;
+            objectList.push_back(object);
+            // std::cout<<"x1:"<<x1 << " y1 : "<<y1<<
+            // "  max_index:"<<max_index << " max_score : "<<max_score<<
+            // "  kpt_x1:"<<kpt_x1 << " kpt_y1 : "<<kpt_y1<<std::endl;
         }
-    }
-
-    #pragma omp parallel sections
-    {
-        #pragma omp section
-        {
-            if (left < j) qsort_descent_inplace(faceobjects, left, j);
-        }
-        #pragma omp section
-        {
-            if (i < right) qsort_descent_inplace(faceobjects, i, right);
-        }
-    }
-}
-
-static void qsort_descent_inplace(std::vector<Object>& objects)
-{
-    if (objects.empty())
-        return;
-
-    qsort_descent_inplace(objects, 0, objects.size() - 1);
-}
-
-static void nms_sorted_bboxes(const std::vector<Object>& faceobjects, std::vector<int>& picked, float nms_threshold)
-{
-    picked.clear();
-
-    const int n = faceobjects.size();
-
-    std::vector<float> areas(n);
-    for (int i = 0; i < n; i++)
-    {
-        areas[i] = faceobjects[i].rect.area();
-    }
-
-    for (int i = 0; i < n; i++)
-    {
-        const Object& a = faceobjects[i];
-
-        int keep = 1;
-        for (int j = 0; j < (int)picked.size(); j++)
-        {
-            const Object& b = faceobjects[picked[j]];
-
-            // intersection over union
-            float inter_area = intersection_area(a, b);
-            float union_area = areas[i] + areas[picked[j]] - inter_area;
-            // float IoU = inter_area / union_area
-            if (inter_area / union_area > nms_threshold)
-                keep = 0;
-        }
-
-        if (keep)
-            picked.push_back(i);
-    }
-}
-
-
-static void generate_yolox_proposals(std::vector<GridAndStride> grid_strides, float* feat_blob, float prob_threshold, std::vector<Object>& objects)
-{
-    const int num_class = 80;
-
-    const int num_anchors = grid_strides.size();
-
-    for (int anchor_idx = 0; anchor_idx < num_anchors; anchor_idx++)
-    {
-        const int grid0 = grid_strides[anchor_idx].grid0;
-        const int grid1 = grid_strides[anchor_idx].grid1;
-        const int stride = grid_strides[anchor_idx].stride;
-
-        const int basic_pos = anchor_idx * 85;
-
-        // yolox/models/yolo_head.py decode logic
-        float x_center = (feat_blob[basic_pos+0] + grid0) * stride;
-        float y_center = (feat_blob[basic_pos+1] + grid1) * stride;
-        float w = exp(feat_blob[basic_pos+2]) * stride;
-        float h = exp(feat_blob[basic_pos+3]) * stride;
-        float x0 = x_center - w * 0.5f;
-        float y0 = y_center - h * 0.5f;
-
-        float box_objectness = feat_blob[basic_pos+4];
-        for (int class_idx = 0; class_idx < num_class; class_idx++)
-        {
-            float box_cls_score = feat_blob[basic_pos + 5 + class_idx];
-            float box_prob = box_objectness * box_cls_score;
-            if (box_prob > prob_threshold)
-            {
-                Object obj;
-                obj.rect.x = x0;
-                obj.rect.y = y0;
-                obj.rect.width = w;
-                obj.rect.height = h;
-                obj.label = class_idx;
-                obj.prob = box_prob;
-
-                objects.push_back(obj);
-            }
-
-        } // class loop
-
-    } // point anchor loop
-}
 
 
 
-static void decode_outputs(float* prob, std::vector<Object>& objects, float scale, const int img_w, const int img_h) {
-        std::vector<Object> proposals;
-        std::vector<int> strides = {8, 16, 32};
-        std::vector<GridAndStride> grid_strides;
-        generate_grids_and_stride(INPUT_W, strides, grid_strides);
-        generate_yolox_proposals(grid_strides, prob,  BBOX_CONF_THRESH, proposals);
-        // std::cout << "num of boxes before nms: " << proposals.size() << std::endl;
-
-        qsort_descent_inplace(proposals);
-
-        std::vector<int> picked;
-        nms_sorted_bboxes(proposals, picked, NMS_THRESH);
-
-
-        int count = picked.size();
-
-        // std::cout << "num of boxes: " << count << std::endl;
-
-        objects.resize(count);
-        for (int i = 0; i < count; i++)
-        {
-            objects[i] = proposals[picked[i]];
-
-            // adjust offset to original unpadded
-            // float x0 = (objects[i].rect.x) / scale;
-            // float y0 = (objects[i].rect.y) / scale;
-            // float x1 = (objects[i].rect.x + objects[i].rect.width) / scale;
-            // float y1 = (objects[i].rect.y + objects[i].rect.height) / scale;
-            float x0 = (objects[i].rect.x);
-            float y0 = (objects[i].rect.y);
-            float x1 = (objects[i].rect.x + objects[i].rect.width);
-            float y1 = (objects[i].rect.y + objects[i].rect.height);
-
-            // clip
-            x0 = std::max(std::min(x0, (float)(img_w - 1)), 0.f);
-            y0 = std::max(std::min(y0, (float)(img_h - 1)), 0.f);
-            x1 = std::max(std::min(x1, (float)(img_w - 1)), 0.f);
-            y1 = std::max(std::min(y1, (float)(img_h - 1)), 0.f);
-
-            objects[i].rect.x = x0;
-            objects[i].rect.y = y0;
-            objects[i].rect.width = x1 - x0;
-            objects[i].rect.height = y1 - y0;
-        }
-}
-
-
-/* This is a sample bounding box parsing function for the sample YoloV5 detector model */
-static bool NvDsInferParseYolox(
-    std::vector<NvDsInferLayerInfo> const& outputLayersInfo,
-    NvDsInferNetworkInfo const& networkInfo,
-    NvDsInferParseDetectionParams const& detectionParams,
-    std::vector<NvDsInferParseObjectInfo>& objectList)
-{
-    float* prob = (float*)outputLayersInfo[0].buffer;
-    std::vector<Object> objects;
-    int img_w = 1920;
-    int img_h = 1080;
-    float scale = std::min(INPUT_W / (img_w*1.0), INPUT_H / (img_h*1.0));
-    decode_outputs(prob, objects, scale, img_w, img_h);
-    
-    for(auto& r : objects) {
-	    NvDsInferParseObjectInfo oinfo;
-        
-	    oinfo.classId = r.label;
-        oinfo.left    = static_cast<unsigned int>(r.rect.x);
-	    oinfo.top     = static_cast<unsigned int>(r.rect.y);
-	    oinfo.width   = static_cast<unsigned int>(r.rect.width);
-	    oinfo.height  = static_cast<unsigned int>(r.rect.height);
-	    oinfo.detectionConfidence = r.prob;
-	    objectList.push_back(oinfo);
-    }
-    return true;
-}
-
-extern "C" bool NvDsInferParseCustomYolox(
-    std::vector<NvDsInferLayerInfo> const &outputLayersInfo,
-    NvDsInferNetworkInfo const &networkInfo,
-    NvDsInferParseDetectionParams const &detectionParams,
-    std::vector<NvDsInferParseObjectInfo> &objectList)
-{
-    return NvDsInferParseYolox(
-        outputLayersInfo, networkInfo, detectionParams, objectList);
+  }
+  return true;
 }
 
 /* Check that the custom function has been defined correctly */

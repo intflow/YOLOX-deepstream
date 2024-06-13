@@ -15,7 +15,7 @@
 #
 
 #CUDA_VER?=
-CUDA_VER=10.2
+CUDA_VER=11.4
 ifeq ($(CUDA_VER),)
   $(error "CUDA_VER is not set")
 endif
@@ -23,7 +23,7 @@ CC:= g++
 NVCC:=/usr/local/cuda-$(CUDA_VER)/bin/nvcc
 
 CFLAGS:= -Wall -std=c++11 -shared -fPIC -Wno-error=deprecated-declarations
-CFLAGS+= -I../../includes -I/usr/local/cuda-$(CUDA_VER)/include -I/home/nvidia/data/zhangbo/library/opencv-4.5.1/include/opencv4 -I/usr/lib/gcc/x86_64-linux-gnu/7/include/ 
+CFLAGS+= -I../../includes -I/usr/local/cuda-$(CUDA_VER)/include -I/home/nvidia/data/zhangbo/library/opencv-4.5.1/include/opencv4 -I/usr/lib/gcc/x86_64-linux-gnu/7/include/  -I/opt/nvidia/deepstream/deepstream-6.3/sources/apps/sample_apps/EFPC_W_custompipeline/include/
 CXXFLAGS:= -fopenmp
 
 LIBS:= -lnvinfer_plugin -lnvinfer -lnvparsers -L/usr/local/cuda-$(CUDA_VER)/lib64 -lcudart -lcublas -lstdc++fs -L/home/nvidia/data/zhangbo/library/opencv-4.5.1/lib -lopencv_core
